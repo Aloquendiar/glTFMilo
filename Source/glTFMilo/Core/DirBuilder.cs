@@ -1,4 +1,4 @@
-﻿using glTFMilo.Source;
+using glTFMilo.Source;
 using MiloGLTFUtils.Source.Shared;
 using MiloLib.Assets;
 using MiloLib.Assets.Char;
@@ -20,7 +20,7 @@ namespace MiloGLTFUtils.Source.glTFMilo.Core
         {
             Character character = Character.New(GameRevisions.GetRevision(selectedGame).CharacterRevision, 0);
             character.currentViewportIdx = 6;
-            character.objFields.revision = 2;
+            character.objFields.SetObjectFieldsRevision(2);
             character.inlineProxy = opts.Type == "instrument";
             character.charTest = Character.CharacterTesting.New(GameRevisions.GetRevision(selectedGame).CharacterTestingRevision, 0);
             character.charTest.distMap = "none";
@@ -54,7 +54,7 @@ namespace MiloGLTFUtils.Source.glTFMilo.Core
         {
             RndDir rndDir = new RndDir(0, 0);
             rndDir.currentViewportIdx = 6;
-            rndDir.objFields.revision = 2;
+            rndDir.objFields.SetObjectFieldsRevision(2);
             rndDir.viewports.Add(new Matrix() { m11 = 1.0f, m12 = 0.0f, m13 = 0.0f, m21 = 0.0f, m22 = 1.0f, m23 = 0.0f, m31 = 0.0f, m32 = 0.0f, m33 = 1.0f, m41 = 0.0f, m42 = 0.0f, m43 = 0.0f });
             rndDir.viewports.Add(new Matrix() { m11 = 1.0f, m12 = 0.0f, m13 = 0.0f, m21 = 0.0f, m22 = 1.0f, m23 = 0.0f, m31 = 0.0f, m32 = 0.0f, m33 = 1.0f, m41 = 0.0f, m42 = 0.0f, m43 = 0.0f });
             rndDir.viewports.Add(new Matrix() { m11 = 1.0f, m12 = 0.0f, m13 = 0.0f, m21 = 0.0f, m22 = 1.0f, m23 = 0.0f, m31 = 0.0f, m32 = 0.0f, m33 = 1.0f, m41 = 0.0f, m42 = 0.0f, m43 = 0.0f });

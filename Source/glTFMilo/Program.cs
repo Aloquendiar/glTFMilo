@@ -115,7 +115,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
         }
 
         // TODO: move these into their own file, putting them in Program.cs feels like unnecessary bloat
-        private static bool IsHairBone(string boneName)
+        private static bool IsHairBone(string? boneName)
         {
             if (string.IsNullOrEmpty(boneName))
             {
@@ -124,6 +124,39 @@ namespace MiloGLTFUtils.Source.glTFMilo
             else
             {
                 if (boneName.StartsWith("bone_hair_", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        private static bool IsBreastBone(string? boneName)
+        {
+            if (string.IsNullOrEmpty(boneName))
+            {
+                return false;
+            }
+            else
+            {
+                if (boneName.StartsWith("bone_torso_breast", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsSkirtBone(string? boneName)
+        {
+            if (string.IsNullOrEmpty(boneName))
+            {
+                return false;
+            }
+            else
+            {
+                if (boneName.StartsWith("bone_skirt", StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -281,7 +314,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
         private static RndMesh CreateBaseMesh(MiloGame selectedGame, string platform, string parentName, Node node, MeshPrimitive primitive, bool convertCoordinates)
         {
             var mesh = RndMesh.New(GameRevisions.GetRevision(selectedGame).ModelRevision, 0, 0, 0);
-            mesh.objFields.revision = 2;
+            mesh.objFields.SetObjectFieldsRevision(2);
             mesh.trans = RndTrans.New(9, 0);
             mesh.trans.parentObj = parentName;
             mesh.draw = RndDrawable.New(3, 0);
@@ -705,7 +738,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
                 newVert.weight3 = 0.0f;
             }
 
-            newVert.vertexColors = new HmxColor4();
+            newVert.vertexColors = new Vertex.Color();
             if (colors != null && originalIndex < colors.Count)
             {
                 var vertexColors = colors[(int)originalIndex];
@@ -928,9 +961,53 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
             List<(string, Matrix4x4)> bandConfigurationPositions = new();
 
+            HashSet<string> allWeightedBones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> hairStrandBones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> breastStrandBones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> skirtStrandBones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             List<(string MeshName, Matrix4x4 LocalMatrix, Matrix4x4 WorldMatrix)> hairCollisionMeshes = new();
-            CharHairExtras detectedHairSettings = null;
+            List<(string MeshName, Matrix4x4 LocalMatrix, Matrix4x4 WorldMatrix)> breastCollisionMeshes = new();
+            List<(string MeshName, Matrix4x4 LocalMatrix, Matrix4x4 WorldMatrix)> skirtCollisionMeshes = new();
+            CharHairExtras? detectedHairSettings = null;
+            CharHairBreastExtras? detectedBreastSettings = null;
+            CharHairSkirtExtras? detectedSkirtSettings = null;
+            MiloHairExtras? detectedCustomHair = null;
+            Dictionary<string, MiloCollisionExtras> armatureCollisionMap = new(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> customRigBoneNames = new(StringComparer.OrdinalIgnoreCase);
+            int customCollideCount = 0;
+
+            // Pre-scan nodes for `milo_hair`, `milo_collisions`, and `milo_collision` custom properties created by `milo_hair_collision_addon`
+            foreach (var scanNode in model.LogicalNodes)
+            {
+                if (detectedCustomHair == null && MiloHairExtras.TryExtractFromNode(scanNode, out var hairCfg) && hairCfg != null)
+                {
+                    detectedCustomHair = hairCfg;
+                    foreach (var fileCfg in hairCfg.Files)
+                    {
+                        foreach (var strandCfg in fileCfg.Strands)
+                        {
+                            foreach (var bName in strandCfg.Bones)
+                            {
+                                if (!string.IsNullOrWhiteSpace(bName))
+                                {
+                                    customRigBoneNames.Add(bName.Trim());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                foreach (var kvp in MiloCollisionExtras.ExtractCollisionMapFromNode(scanNode))
+                {
+                    armatureCollisionMap[kvp.Key] = kvp.Value;
+                    customRigBoneNames.Add(kvp.Key);
+                }
+
+                if (!string.IsNullOrEmpty(scanNode?.Name) && MiloCollisionExtras.TryExtractFromNode(scanNode, out _))
+                {
+                    customRigBoneNames.Add(scanNode.Name);
+                }
+            }
 
             // loop through all gltf nodes and create a milo asset that matches the type of node it is
             // TODO: add lights, possibly other kinds
@@ -1163,9 +1240,21 @@ namespace MiloGLTFUtils.Source.glTFMilo
                                     foreach (int jointIndex in meshChunk.jointIndices)
                                     {
                                         string jointName = meshSkin?.Joints[jointIndex].Name ?? string.Empty;
+                                        if (!string.IsNullOrEmpty(jointName))
+                                        {
+                                            allWeightedBones.Add(jointName);
+                                        }
                                         if (IsHairBone(jointName))
                                         {
                                             hairStrandBones.Add(jointName);
+                                        }
+                                        if (IsBreastBone(jointName))
+                                        {
+                                            breastStrandBones.Add(jointName);
+                                        }
+                                        if (IsSkirtBone(jointName))
+                                        {
+                                            skirtStrandBones.Add(jointName);
                                         }
                                     }
 
@@ -1218,13 +1307,28 @@ namespace MiloGLTFUtils.Source.glTFMilo
                                     }
 
                                     string nodeName = node.Name ?? string.Empty;
-                                    bool isHairCollisionMesh = string.Equals(objectType, "CharCollide", StringComparison.OrdinalIgnoreCase) ||
+                                    bool isCollisionMesh = string.Equals(objectType, "CharCollide", StringComparison.OrdinalIgnoreCase) ||
                                         entry.name.value.EndsWith(".coll", StringComparison.OrdinalIgnoreCase) ||
                                         entry.name.value.EndsWith(".collide", StringComparison.OrdinalIgnoreCase) ||
                                         nodeName.EndsWith(".coll", StringComparison.OrdinalIgnoreCase) ||
-                                        nodeName.EndsWith(".collide", StringComparison.OrdinalIgnoreCase) ||
-                                        nodeName.Contains("hair_collide", StringComparison.OrdinalIgnoreCase);
+                                        nodeName.EndsWith(".collide", StringComparison.OrdinalIgnoreCase);
 
+                                    bool isBreastCollisionMesh = isCollisionMesh && nodeName.Contains("breast_collide", StringComparison.OrdinalIgnoreCase);
+                                    // bool isBreastCollisionMesh = nodeName.Contains("breast_collide", StringComparison.OrdinalIgnoreCase) ||
+                                    //     (isCollisionMesh && (nodeName.Contains("breast", StringComparison.OrdinalIgnoreCase) || entry.name.value.Contains("breast", StringComparison.OrdinalIgnoreCase)));
+
+                                    bool isSkirtCollisionMesh = isCollisionMesh && nodeName.Contains("skirt_collide", StringComparison.OrdinalIgnoreCase);
+
+                                    bool isHairCollisionMesh = isCollisionMesh || nodeName.Contains("hair_collide", StringComparison.OrdinalIgnoreCase);
+
+                                    if (isBreastCollisionMesh)
+                                    {
+                                        breastCollisionMeshes.Add((entry.name.value, node.LocalMatrix, node.WorldMatrix));
+                                    }
+                                    if (isSkirtCollisionMesh)
+                                    {
+                                        skirtCollisionMeshes.Add((entry.name.value, node.LocalMatrix, node.WorldMatrix));
+                                    }
                                     if (isHairCollisionMesh)
                                     {
                                         hairCollisionMeshes.Add((entry.name.value, node.LocalMatrix, node.WorldMatrix));
@@ -1242,9 +1346,25 @@ namespace MiloGLTFUtils.Source.glTFMilo
                         return;
                     }
                 }
-                else if (NodeHelpers.IsBone(node, model))
+                else if (NodeHelpers.IsBone(node, model) || (!string.IsNullOrEmpty(node.Name) && customRigBoneNames.Contains(node.Name)))
                 {
                     NodeProcessor.ProcessBoneNode(node, model, meta, type, filename, convertWorldCoordinates);
+
+                    if (!string.IsNullOrEmpty(node.Name))
+                    {
+                        if (!MiloCollisionExtras.TryExtractFromNode(node, out var boneCollExtras))
+                        {
+                            armatureCollisionMap.TryGetValue(node.Name, out boneCollExtras);
+                        }
+
+                        if (boneCollExtras != null && boneCollExtras.Enabled != 0)
+                        {
+                            if (NodeProcessor.ProcessCustomBoneCollide(node, model, meta, selectedGame, boneCollExtras, type, filename, convertWorldCoordinates))
+                            {
+                                customCollideCount++;
+                            }
+                        }
+                    }
 
                     if (IsHairBone(node.Name))
                     {
@@ -1269,6 +1389,52 @@ namespace MiloGLTFUtils.Source.glTFMilo
                             }
                         }
                     }
+                    else if (IsBreastBone(node.Name))
+                    {
+                        if (node.Extras != null)
+                        {
+                            try
+                            {
+                                string json = node.Extras.ToString();
+
+                                if (json.Contains("milo_breast_"))
+                                {
+                                    var breastData = JsonSerializer.Deserialize<CharHairBreastExtras>(json);
+                                    if (breastData != null && detectedBreastSettings == null)
+                                    {
+                                        detectedBreastSettings = breastData;
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                // hair extras are optional, so bad extras should not detonate the whole export
+                            }
+                        }
+                    }
+                    else if (IsSkirtBone(node.Name))
+                    {
+                        if (node.Extras != null)
+                        {
+                            try
+                            {
+                                string json = node.Extras.ToString();
+
+                                if (json.Contains("milo_skirt_"))
+                                {
+                                    var skirtData = JsonSerializer.Deserialize<CharHairSkirtExtras>(json);
+                                    if (skirtData != null && detectedSkirtSettings == null)
+                                    {
+                                        detectedSkirtSettings = skirtData;
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                // hair extras are optional, so bad extras should not detonate the whole export
+                            }
+                        }
+                    }
                 }
                 else if (NodeHelpers.IsGroupNode(node, model))
                 {
@@ -1284,10 +1450,65 @@ namespace MiloGLTFUtils.Source.glTFMilo
                 }
             }
 
-            if (hairStrandBones.Count > 0)
+            bool usedCustomHair = false;
+            if (detectedCustomHair != null && detectedCustomHair.Enabled != 0)
             {
-                NodeProcessor.ProcessCharHair(meta, selectedGame, model, hairStrandBones, detectedHairSettings ?? new CharHairExtras(), convertWorldCoordinates, !opts.DisableSplitting);
-                NodeProcessor.ProcessEmptyHairCollides(meta, selectedGame, hairCollisionMeshes, filename, convertWorldCoordinates);
+                usedCustomHair = NodeProcessor.ProcessCustomCharHair(
+                    meta,
+                    selectedGame,
+                    model,
+                    detectedCustomHair,
+                    filename,
+                    type,
+                    allWeightedBones,
+                    convertWorldCoordinates,
+                    !opts.DisableSplitting);
+            }
+
+            if (!usedCustomHair)
+            {
+                if (hairStrandBones.Count > 0)
+                {
+                    NodeProcessor.ProcessCharHair(meta, selectedGame, model, hairStrandBones, detectedHairSettings ?? new CharHairExtras(), convertWorldCoordinates, !opts.DisableSplitting);
+                    if (customCollideCount == 0)
+                    {
+                        NodeProcessor.ProcessEmptyHairCollides(meta, selectedGame, hairCollisionMeshes, filename, convertWorldCoordinates);
+                    }
+                }
+
+                if (breastStrandBones.Count > 0)
+                {
+                    NodeProcessor.ProcessCharBreast(meta, selectedGame, model, breastStrandBones, detectedBreastSettings ?? new CharHairBreastExtras(), convertWorldCoordinates, !opts.DisableSplitting);
+                    if (customCollideCount == 0)
+                    {
+                        NodeProcessor.ProcessEmptyBreastCollides(meta, selectedGame, breastCollisionMeshes, filename, convertWorldCoordinates);
+                    }
+                }
+
+                if (skirtStrandBones.Count > 0)
+                {
+                    NodeProcessor.ProcessCharSkirt(meta, selectedGame, model, skirtStrandBones, detectedSkirtSettings ?? new CharHairSkirtExtras(), convertWorldCoordinates, !opts.DisableSplitting);
+                    if (customCollideCount == 0)
+                    {
+                        NodeProcessor.ProcessEmptySkirtCollides(meta, selectedGame, skirtCollisionMeshes, filename, convertWorldCoordinates);
+                    }
+                }
+            }
+            else if (customCollideCount == 0)
+            {
+                // If custom hair was used without any custom bone collisions, still allow fallback empty .coll meshes if present
+                if (hairCollisionMeshes.Count > 0)
+                {
+                    NodeProcessor.ProcessEmptyHairCollides(meta, selectedGame, hairCollisionMeshes, filename, convertWorldCoordinates);
+                }
+                if (breastCollisionMeshes.Count > 0)
+                {
+                    NodeProcessor.ProcessEmptyBreastCollides(meta, selectedGame, breastCollisionMeshes, filename, convertWorldCoordinates);
+                }
+                if (skirtCollisionMeshes.Count > 0)
+                {
+                    NodeProcessor.ProcessEmptySkirtCollides(meta, selectedGame, skirtCollisionMeshes, filename, convertWorldCoordinates);
+                }
             }
 
             foreach (var anim in model.LogicalAnimations)
@@ -1327,7 +1548,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
                     transAnim.trans = targetNode + ".mesh";
                     transAnim.keysOwner = anim.Name + ".tnm";
 
-                    transAnim.objFields.revision = 2;
+                    transAnim.objFields.SetObjectFieldsRevision(2);
 
                     // loop through all channels and add the keys to the transAnim
                     foreach (var channel in anim.Channels)
@@ -1385,7 +1606,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
             {
                 // create a band configuration object
                 BandConfiguration bandConfig = new BandConfiguration();
-                bandConfig.objFields.revision = 2;
+                bandConfig.objFields.SetObjectFieldsRevision(2);
                 foreach (var pos in bandConfigurationPositions)
                 {
                     var trans = new BandConfiguration.TargTransform();
@@ -1412,6 +1633,10 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
             int curmat = 0;
 
+            // cache of already generated textures, keyed by "channel:imageIndex", so materials that share
+            // the same image reuse a single .tex entry instead of creating duplicates
+            var texCache = new Dictionary<string, (string Name, bool HasAlpha)>();
+
             // loop through all materials
             foreach (var material in model.LogicalMaterials)
             {
@@ -1422,7 +1647,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
                 meta.entries.Add(matEntry);
 
                 RndTex tex = RndTex.New(GameRevisions.GetRevision(selectedGame).TextureRevision, 0);
-                tex.objFields.revision = 2;
+                tex.objFields.SetObjectFieldsRevision(2);
 
                 var baseColorTexture = material.FindChannel("BaseColor")?.Texture;
                 var sampler = baseColorTexture?.Sampler;
@@ -1430,10 +1655,9 @@ namespace MiloGLTFUtils.Source.glTFMilo
                 if (baseColorTexture != null)
                 {
                     curmat++;
-                    mat.diffuseTex = material.Name + ".tex";
                     mat.stencilMode = RndMat.StencilMode.kStencilIgnore;
 
-                    mat.perPixelLit = true;
+                    mat.perPixelLit = false;
                     if (opts.Prelit != "false")
                     {
                         mat.preLit = true;
@@ -1461,7 +1685,8 @@ namespace MiloGLTFUtils.Source.glTFMilo
                     mat.normalDetailTiling = 1.0f;
                     mat.rimPower = 0.0f;
                     mat.specular2Power = 0.0f;
-                    mat.rimRGB = new HmxColor3(0.0f, 0.0f, 0.0f, 0.0f);
+                    mat.deNormal = 0.0f; //Valor para intensidad de De Normal -3 a 1
+                    mat.rimRGB = new HmxColor3(0.0f, 0.0f, 0.0f);
                     mat.rimPower = 4.0f;
                     mat.specularPower = 0.0f;
                     mat.specular2Power = 0.0f;
@@ -1493,33 +1718,27 @@ namespace MiloGLTFUtils.Source.glTFMilo
                         mat.texWrap = RndMat.TexWrap.kTexWrapRepeat;
                     }
 
+                    string diffuseKey = $"diffuse:{baseColorTexture.PrimaryImage.LogicalIndex}";
+                    bool hasAlpha;
+
+                    if (texCache.TryGetValue(diffuseKey, out var cachedDiffuse))
+                    {
+                        // another material already generated this texture, just reference it
+                        mat.diffuseTex = cachedDiffuse.Name;
+                        hasAlpha = cachedDiffuse.HasAlpha;
+                    }
+                    else
+                    {
+                    string diffuseTexName = material.Name + ".tex";
+                    mat.diffuseTex = diffuseTexName;
+
                     using (var str = baseColorTexture.PrimaryImage.Content.Open())
                     {
                         Surface tempImage = Surface.LoadFromStream(str);
-                        bool hasAlpha = tempImage.IsTransparent;
+                        hasAlpha = tempImage.IsTransparent;
                         str.Position = 0;
                         CompressionFormat format = hasAlpha ? CompressionFormat.BC3 : CompressionFormat.BC1;
                         TextureUtils.ConvertToDDS(str, $"output_{curmat}.dds", format, ignoreLimits);
-                        mat.zMode = RndMat.ZMode.kZModeNormal;
-
-                        // i think this is generally correct?
-                        if (material.Alpha == SharpGLTF.Schema2.AlphaMode.MASK)
-                        {
-                            mat.alphaCut = true;
-                            mat.alphaThreshold = (int)(material.AlphaCutoff * 255.0f);
-                            mat.blend = RndMat.Blend.kBlendSrc;
-                        }
-                        else if (hasAlpha)
-                        {
-                            mat.alphaCut = false;
-                            mat.alphaWrite = true;
-                            mat.blend = RndMat.Blend.kBlendSrcAlpha;
-                        }
-                        else
-                        {
-                            mat.alphaCut = false;
-                            mat.blend = RndMat.Blend.kBlendSrc;
-                        }
 
                         var (width, height, bpp, mipMapCount, pixels) = TextureUtils.ParseDDS($"output_{curmat}.dds");
                         tex.width = (uint)width;
@@ -1540,38 +1759,68 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                         if (meta.platform == DirectoryMeta.Platform.Xbox)
                         {
-                            List<byte> swapped = new List<byte>();
+                            byte[] swapped = new byte[pixels.Length];
                             for (int i = 0; i < pixels.Length; i += 4)
                             {
-                                swapped.Add(pixels[i + 1]);
-                                swapped.Add(pixels[i]);
-                                swapped.Add(pixels[i + 3]);
-                                swapped.Add(pixels[i + 2]);
+                                swapped[i] = pixels[i + 1];
+                                swapped[i + 1] = pixels[i];
+                                swapped[i + 2] = pixels[i + 3];
+                                swapped[i + 3] = pixels[i + 2];
                             }
                             tex.bitmap.textures.Add(swapped);
                         }
                         else
                         {
-                            tex.bitmap.textures.Add(pixels.ToList());
+                            tex.bitmap.textures.Add(pixels);
                         }
                     }
 
                     // delete the dds file that was created so we don't have a bunch of dds files lying around
                     File.Delete($"output_{curmat}.dds");
 
-                    DirectoryMeta.Entry texEntry = new DirectoryMeta.Entry("Tex", material.Name + ".tex", tex);
+                    DirectoryMeta.Entry texEntry = new DirectoryMeta.Entry("Tex", diffuseTexName, tex);
                     meta.entries.Add(texEntry);
 
-                    mat.objFields.revision = 2;
+                    texCache[diffuseKey] = (diffuseTexName, hasAlpha);
+                    }
+
+                    mat.zMode = RndMat.ZMode.kZModeNormal;
+
+                    // i think this is generally correct?
+                    if (material.Alpha == SharpGLTF.Schema2.AlphaMode.MASK)
+                    {
+                        mat.alphaCut = true;
+                        mat.alphaThreshold = (int)(material.AlphaCutoff * 255.0f);
+                        mat.blend = RndMat.Blend.kBlendSrc;
+                    }
+                    else if (hasAlpha)
+                    {
+                        mat.alphaCut = false;
+                        mat.alphaWrite = true;
+                        mat.blend = RndMat.Blend.kBlendSrcAlpha;
+                    }
+                    else
+                    {
+                        mat.alphaCut = false;
+                        mat.blend = RndMat.Blend.kBlendSrc;
+                    }
+
+                    mat.objFields.SetObjectFieldsRevision(2);
                 }
 
                 var normalChannel = material.FindChannel("Normal");
                 var normalMapTexture = normalChannel?.Texture;
 
                 RndTex normalTex = RndTex.New(GameRevisions.GetRevision(selectedGame).TextureRevision, 0);
-                normalTex.objFields.revision = 2;
+                normalTex.objFields.SetObjectFieldsRevision(2);
 
-                if (normalMapTexture != null)
+                string normalKey = normalMapTexture != null ? $"norm:{normalMapTexture.PrimaryImage.LogicalIndex}" : null;
+
+                if (normalMapTexture != null && texCache.TryGetValue(normalKey, out var cachedNormal))
+                {
+                    mat.normalMap = cachedNormal.Name;
+                }
+                else if (normalMapTexture != null)
                 {
                     using (var str = normalMapTexture.PrimaryImage.Content.Open())
                     {
@@ -1602,19 +1851,19 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                         if (meta.platform == DirectoryMeta.Platform.Xbox)
                         {
-                            List<byte> swapped = new List<byte>();
+                            byte[] swapped = new byte[pixels.Length];
                             for (int i = 0; i < pixels.Length; i += 4)
                             {
-                                swapped.Add(pixels[i + 1]);
-                                swapped.Add(pixels[i]);
-                                swapped.Add(pixels[i + 3]);
-                                swapped.Add(pixels[i + 2]);
+                                swapped[i] = pixels[i + 1];
+                                swapped[i + 1] = pixels[i];
+                                swapped[i + 2] = pixels[i + 3];
+                                swapped[i + 3] = pixels[i + 2];
                             }
                             normalTex.bitmap.textures.Add(swapped);
                         }
                         else
                         {
-                            normalTex.bitmap.textures.Add(pixels.ToList());
+                            normalTex.bitmap.textures.Add(pixels);
                         }
                     }
 
@@ -1624,6 +1873,8 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                     DirectoryMeta.Entry texEntry = new DirectoryMeta.Entry("Tex", material.Name + "_norm.tex", normalTex);
                     meta.entries.Add(texEntry);
+
+                    texCache[normalKey] = (material.Name + "_norm.tex", false);
                 }
 
 
@@ -1633,10 +1884,17 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
 
                 RndTex emissiveTex = RndTex.New(GameRevisions.GetRevision(selectedGame).TextureRevision, 0);
-                emissiveTex.objFields.revision = 2;
+                emissiveTex.objFields.SetObjectFieldsRevision(2);
 
 
-                if (emissiveMapTexture != null)
+                string emissiveKey = emissiveMapTexture != null ? $"emissive:{emissiveMapTexture.PrimaryImage.LogicalIndex}" : null;
+
+                if (emissiveMapTexture != null && texCache.TryGetValue(emissiveKey, out var cachedEmissive))
+                {
+                    mat.emissiveMap = cachedEmissive.Name;
+                    mat.emissiveMultiplier = 1.0f;
+                }
+                else if (emissiveMapTexture != null)
                 {
                     using (var str = emissiveMapTexture.PrimaryImage.Content.Open())
                     {
@@ -1659,19 +1917,19 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                         if (meta.platform == DirectoryMeta.Platform.Xbox)
                         {
-                            List<byte> swapped = new List<byte>();
+                            byte[] swapped = new byte[pixels.Length];
                             for (int i = 0; i < pixels.Length; i += 4)
                             {
-                                swapped.Add(pixels[i + 1]);
-                                swapped.Add(pixels[i]);
-                                swapped.Add(pixels[i + 3]);
-                                swapped.Add(pixels[i + 2]);
+                                swapped[i] = pixels[i + 1];
+                                swapped[i + 1] = pixels[i];
+                                swapped[i + 2] = pixels[i + 3];
+                                swapped[i + 3] = pixels[i + 2];
                             }
                             emissiveTex.bitmap.textures.Add(swapped);
                         }
                         else
                         {
-                            emissiveTex.bitmap.textures.Add(pixels.ToList());
+                            emissiveTex.bitmap.textures.Add(pixels);
 
                             emissiveTex.optimizeForPS3 = true;
                         }
@@ -1684,6 +1942,8 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                     DirectoryMeta.Entry emissiveTexEntry = new DirectoryMeta.Entry("Tex", material.Name + "_emissive.tex", emissiveTex);
                     meta.entries.Add(emissiveTexEntry);
+
+                    texCache[emissiveKey] = (material.Name + "_emissive.tex", false);
                 }
 
 
@@ -1693,9 +1953,15 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
 
                 RndTex specularColorMapTex = RndTex.New(GameRevisions.GetRevision(selectedGame).TextureRevision, 0);
-                specularColorMapTex.objFields.revision = 2;
+                specularColorMapTex.objFields.SetObjectFieldsRevision(2);
 
-                if (specularColorMapTexture != null)
+                string specKey = specularColorMapTexture != null ? $"spec:{specularColorMapTexture.PrimaryImage.LogicalIndex}" : null;
+
+                if (specularColorMapTexture != null && texCache.TryGetValue(specKey, out var cachedSpec))
+                {
+                    mat.specularMap = cachedSpec.Name;
+                }
+                else if (specularColorMapTexture != null)
                 {
                     using (var str = specularColorMapTexture.PrimaryImage.Content.Open())
                     {
@@ -1718,19 +1984,19 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                         if (meta.platform == DirectoryMeta.Platform.Xbox)
                         {
-                            List<byte> swapped = new List<byte>();
+                            byte[] swapped = new byte[pixels.Length];
                             for (int i = 0; i < pixels.Length; i += 4)
                             {
-                                swapped.Add(pixels[i + 1]);
-                                swapped.Add(pixels[i]);
-                                swapped.Add(pixels[i + 3]);
-                                swapped.Add(pixels[i + 2]);
+                                swapped[i] = pixels[i + 1];
+                                swapped[i + 1] = pixels[i];
+                                swapped[i + 2] = pixels[i + 3];
+                                swapped[i + 3] = pixels[i + 2];
                             }
                             specularColorMapTex.bitmap.textures.Add(swapped);
                         }
                         else
                         {
-                            specularColorMapTex.bitmap.textures.Add(pixels.ToList());
+                            specularColorMapTex.bitmap.textures.Add(pixels);
 
                             specularColorMapTex.optimizeForPS3 = true;
                         }
@@ -1742,12 +2008,14 @@ namespace MiloGLTFUtils.Source.glTFMilo
 
                     DirectoryMeta.Entry specularTexEntry = new DirectoryMeta.Entry("Tex", material.Name + "_spec.tex", specularColorMapTex);
                     meta.entries.Add(specularTexEntry);
+
+                    texCache[specKey] = (material.Name + "_spec.tex", false);
                 }
 
 
                 if (specularColor != null)
                 {
-                    mat.specularRGB = new HmxColor3(specularColor.Value.Color.X, specularColor.Value.Color.Y, specularColor.Value.Color.Z, specularColor.Value.Color.W);
+                    mat.specularRGB = new HmxColor3(specularColor.Value.Color.X, specularColor.Value.Color.Y, specularColor.Value.Color.Z);
                 }
 
                 var specularFactor = material.FindChannel("SpecularFactor");
@@ -1792,7 +2060,7 @@ namespace MiloGLTFUtils.Source.glTFMilo
                 allGeomGrp.draw.sphere.radius = 0.0f;
                 allGeomGrp.anim = RndAnimatable.New(GameRevisions.GetRevision(selectedGame).AnimatableRevision, 0);
 
-                allGeomGrp.objFields.revision = 2;
+                allGeomGrp.objFields.SetObjectFieldsRevision(2);
 
                 foreach (var entry in meta.entries)
                 {

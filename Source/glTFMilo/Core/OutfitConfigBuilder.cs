@@ -1,4 +1,4 @@
-﻿using glTFMilo.Source;
+using glTFMilo.Source;
 using MiloGLTFUtils.Source.Shared;
 using MiloLib.Assets;
 using MiloLib.Assets.Char;
@@ -35,7 +35,7 @@ namespace MiloGLTFUtils.Source.glTFMilo.Core
                 .GetField("revision", BindingFlags.NonPublic | BindingFlags.Instance)
                 .SetValue(config, GameRevisions.GetRevision(selectedGame).OutfitConfigRevision);
 
-            config.objFields.revision = 2;
+            config.objFields.SetObjectFieldsRevision(2);
             config.computeAO = configJson.ComputeAO;
 
             AddMatSwaps(configJson, config, meta);
@@ -90,7 +90,7 @@ namespace MiloGLTFUtils.Source.glTFMilo.Core
             typeof(ColorPalette)
                 .GetField("revision", BindingFlags.NonPublic | BindingFlags.Instance)
                 .SetValue(pal, (ushort)1);
-            pal.objFields.revision = 2;
+            pal.objFields.SetObjectFieldsRevision(2);
             pal.colors = colors.Select(c => new HmxColor4(c.R, c.G, c.B, c.A)).ToList();
 
             meta.entries.Add(new DirectoryMeta.Entry("ColorPalette", name, pal));
